@@ -120,6 +120,9 @@ _SCENE_RESOLVERS = {
     "cell": openarm_mujoco.openarm_cell_xml,
     "demo": openarm_mujoco.openarm_demo_xml,
     "pedestal": openarm_mujoco.openarm_pedestal_xml,
+    "transfer": openarm_mujoco.openarm_transfer_cube_xml,
+    "insertion": openarm_mujoco.openarm_insertion_xml,
+    "two_arm_lift":openarm_mujoco.openarm_two_arm_lift_xml
 }
 _DEFAULT_SCENE = "cell"
 _DEFAULT_VIEWER_FPS = 30.0
