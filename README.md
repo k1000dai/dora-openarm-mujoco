@@ -68,6 +68,7 @@ uv run dora run dataflow-dummy.yaml
 | `position_left` | `float32[8]` | Same layout for the left arm. |
 | `pose_right` | `float32[7]` | VR controller pose `[x, y, z, qw, qx, qy, qz]`. Used only with `--debug-frames`. |
 | `pose_left` | `float32[7]` | Same for the left controller. |
+| `joystick_y` | `float32[1]` | Joystick Y axis (-1..1). Edge-triggered: when `\|y\|` ≥ 0.7 the freejoint scene objects (non-arm bodies) snap back to the `--keyframe` pose; the stick must drop below 0.3 to re-arm. |
 
 ## Outputs
 
