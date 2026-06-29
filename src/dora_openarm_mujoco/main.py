@@ -101,6 +101,16 @@ CLI arguments (set via ``args:`` in the dataflow YAML)
 --debug-frames
     Draw the VR controller coordinate frames as coloured arrows in the viewer.
     Only visible when ``--viewer`` is also set.
+
+--randomize
+    Randomize free-object (e.g. peg/socket) xy positions on load.  Each non-arm
+    freejoint object is offset from its keyframe pose by a uniform random xy
+    displacement.  The joystick_y reset re-randomizes the same way, so every
+    episode reset gets a fresh placement.
+
+--randomize-range METERS  (default: 0.05)
+    Half-range in metres for --randomize: each object's x and y are offset by
+    ``uniform(-range, +range)``.
 """
 
 import argparse
@@ -127,10 +137,7 @@ _SCENE_RESOLVERS = {
     "cell": openarm_mujoco.openarm_cell_xml,
     "demo": openarm_mujoco.openarm_demo_xml,
     "pedestal": openarm_mujoco.openarm_pedestal_xml,
-    "transfer": openarm_mujoco.openarm_transfer_cube_xml,
     "insertion": openarm_mujoco.openarm_insertion_xml,
-    "two_arm_lift": openarm_mujoco.openarm_two_arm_lift_xml,
-    "cloth": openarm_mujoco.openarm_cloth_fold_xml,
 }
 _DEFAULT_SCENE = "cell"
 _DEFAULT_VIEWER_FPS = 30.0
@@ -218,14 +225,26 @@ def _reset_scene_objects(
     data: mujoco.MjData,
     key_id: int,
     addrs: list[tuple[int, int, str]],
+    rng: "np.random.Generator | None" = None,
+    randomize_range: float = 0.0,
 ) -> None:
-    """Snap each freejoint object (arms excluded) back to its keyframe pose."""
+    """Snap each freejoint object (arms excluded) back to its keyframe pose.
+
+    When ``rng`` is given and ``randomize_range`` > 0, each object's xy is then
+    offset from the keyframe pose by ``uniform(-range, +range)`` (independent per
+    object and per axis).
+    """
     if key_id < 0 or not addrs:
         return
+    do_randomize = rng is not None and randomize_range > 0
     for qpos_adr, qvel_adr, _ in addrs:
         data.qpos[qpos_adr : qpos_adr + 7] = model.key_qpos[
             key_id, qpos_adr : qpos_adr + 7
         ]
+        if do_randomize:
+            data.qpos[qpos_adr : qpos_adr + 2] += rng.uniform(
+                -randomize_range, randomize_range, size=2
+            )
         data.qvel[qvel_adr : qvel_adr + 6] = 0.0
     mujoco.mj_forward(model, data)
 
@@ -350,6 +369,8 @@ def _run_dora(
     object_addrs: list[tuple[int, int, str]],
     use_ctrl: bool = False,
     debug_frames: bool = False,
+    rng: "np.random.Generator | None" = None,
+    randomize_range: float = 0.0,
 ) -> None:
     print("[dora] Event loop started.")
     pose_right: np.ndarray | None = None
@@ -392,9 +413,17 @@ def _run_dora(
                 y = float(np.asarray(event["value"])[0])
                 if reset_armed and abs(y) >= _RESET_TRIGGER:
                     with _lock(viewer, data_lock):
-                        _reset_scene_objects(model, data, reset_key_id, object_addrs)
+                        _reset_scene_objects(
+                            model,
+                            data,
+                            reset_key_id,
+                            object_addrs,
+                            rng,
+                            randomize_range,
+                        )
                     names = ", ".join(name for _, _, name in object_addrs) or "(none)"
-                    print(f"[reset] joystick_y={y:+.2f} → reset objects: {names}")
+                    mode = "randomized" if rng is not None else "reset"
+                    print(f"[reset] joystick_y={y:+.2f} → {mode} objects: {names}")
                     reset_armed = False
                 elif not reset_armed and abs(y) <= _RESET_REARM:
                     reset_armed = True
@@ -564,6 +593,17 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Draw VR controller coordinate frames as overlays in the viewer (default: off)",
     )
+    p.add_argument(
+        "--randomize",
+        action="store_true",
+        help="Randomize free-object (e.g. peg/socket) xy positions on load",
+    )
+    p.add_argument(
+        "--randomize-range",
+        type=float,
+        default=0.05,
+        help="Half-range in meters for --randomize (default: 0.05)",
+    )
     return p.parse_args()
 
 
@@ -584,6 +624,23 @@ def main() -> None:
     signal.signal(signal.SIGTERM, _on_signal)
 
     model, data, mapper, reset_key_id, object_addrs = _setup_model(args)
+
+    rng = np.random.default_rng() if args.randomize else None
+    if rng is not None:
+        if reset_key_id < 0:
+            print(
+                "[randomize] Warning: no keyframe to randomize around – "
+                "--randomize is a no-op."
+            )
+        elif object_addrs:
+            _reset_scene_objects(
+                model, data, reset_key_id, object_addrs, rng, args.randomize_range
+            )
+            names = ", ".join(name for _, _, name in object_addrs)
+            print(
+                f"[randomize] xy randomized (±{args.randomize_range:g} m) for: {names}"
+            )
+
     frame_dt = 1.0 / target_fps
     steps_per_frame = max(1, math.ceil(frame_dt / model.opt.timestep))
     loop_dt = steps_per_frame * model.opt.timestep if args.ctrl else frame_dt
@@ -631,6 +688,8 @@ def main() -> None:
                     object_addrs,
                     args.ctrl,
                     args.debug_frames,
+                    rng,
+                    args.randomize_range,
                 ),
                 daemon=True,
             )
@@ -663,6 +722,8 @@ def main() -> None:
                 object_addrs,
                 args.ctrl,
                 args.debug_frames,
+                rng,
+                args.randomize_range,
             ),
             daemon=True,
         )
