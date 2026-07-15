@@ -12,13 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+import sys
+
 import mujoco
 import numpy as np
 import pytest
 
 from dora_openarm_mujoco.main import (
     _find_scene_joint_addrs,
+    _parse_args,
     _reset_scene_objects,
+    _setup_model,
     SceneRandomizer,
 )
 
@@ -153,3 +158,51 @@ def test_consecutive_applies_differ(scene):
     first = data.qpos[0:7].copy()
     r.apply(model, data, key_id, addrs)
     assert not np.array_equal(data.qpos[0:7], first)
+
+
+def test_parse_args_defaults_to_disabled(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["dora-openarm-mujoco"])
+    args = _parse_args()
+    assert args.randomize_pos == 0.0
+    assert args.randomize_yaw == 0.0
+
+
+def test_parse_args_rejects_negative_pos(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["dora-openarm-mujoco", "--randomize-pos", "-0.1"])
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_setup_model_applies_startup_randomization():
+    args = argparse.Namespace(
+        xml=None,
+        scene="demo",
+        keyframe="home",
+        enable_collision=False,
+        ctrl=False,
+        randomize_pos=0.05,
+        randomize_yaw=180.0,
+    )
+    model, data, _, key_id, addrs, randomizer = _setup_model(args)
+    assert randomizer.enabled
+    free = [a for a in addrs if a[3] == mujoco.mjtJoint.mjJNT_FREE]
+    assert free
+    adr = free[0][0].start
+    key_xy = model.key_qpos[key_id, adr : adr + 2]
+    xy = data.qpos[adr : adr + 2]
+    assert np.all(np.abs(xy - key_xy) <= 0.05)
+
+
+def test_setup_model_disabled_randomizer_keeps_keyframe():
+    args = argparse.Namespace(
+        xml=None,
+        scene="demo",
+        keyframe="home",
+        enable_collision=False,
+        ctrl=False,
+        randomize_pos=0.0,
+        randomize_yaw=0.0,
+    )
+    model, data, _, key_id, addrs, randomizer = _setup_model(args)
+    assert not randomizer.enabled
+    np.testing.assert_array_equal(data.qpos, model.key_qpos[key_id])

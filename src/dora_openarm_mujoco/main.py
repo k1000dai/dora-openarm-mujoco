@@ -419,6 +419,7 @@ def _run_dora(
     stop_event: threading.Event,
     reset_key_id: int,
     object_addrs: list[tuple[slice, slice, str, mujoco.mjtJoint]],
+    randomizer: SceneRandomizer,
     use_ctrl: bool = False,
     debug_frames: bool = False,
 ) -> None:
@@ -467,6 +468,7 @@ def _run_dora(
                 if pressed and not button_x_prev:
                     with _lock(viewer, data_lock):
                         _reset_scene_objects(model, data, reset_key_id, object_addrs)
+                        randomizer.apply(model, data, reset_key_id, object_addrs)
                     names = (
                         ", ".join(name for _, _, name, _ in object_addrs) or "(none)"
                     )
@@ -533,6 +535,7 @@ def _setup_model(
     JointResolver,
     int,
     list[tuple[slice, slice, str, mujoco.mjtJoint]],
+    SceneRandomizer,
 ]:
     xml_path = args.xml if args.xml is not None else _SCENE_RESOLVERS[args.scene]()
     print(f"[model] Loading scene: {xml_path}")
@@ -573,7 +576,15 @@ def _setup_model(
     else:
         print("[model] No non-arm scene joints found – button_x reset will be a no-op.")
 
-    return model, data, mapper, key_id, object_addrs
+    randomizer = SceneRandomizer(args.randomize_pos, args.randomize_yaw)
+    if randomizer.enabled:
+        print(
+            f"[randomize] Enabled: pos=±{args.randomize_pos:g}m "
+            f"yaw=±{args.randomize_yaw:g}°"
+        )
+        randomizer.apply(model, data, key_id, object_addrs)
+
+    return model, data, mapper, key_id, object_addrs, randomizer
 
 
 # ── argument parsing ───────────────────────────────────────────────────────────
@@ -586,6 +597,16 @@ def _positive_float(value: str) -> float:
         raise argparse.ArgumentTypeError("must be a number") from exc
     if not math.isfinite(parsed) or parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive finite number")
+    return parsed
+
+
+def _non_negative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(parsed) or parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative finite number")
     return parsed
 
 
@@ -604,6 +625,26 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--keyframe", "-k", default="home", help="Initial keyframe name (default: home)"
+    )
+    p.add_argument(
+        "--randomize-pos",
+        type=_non_negative_float,
+        default=0.0,
+        metavar="METERS",
+        help=(
+            "On startup and button_x reset, offset each freejoint object's "
+            "keyframe XY position by uniform noise in ±METERS (default: 0, off)"
+        ),
+    )
+    p.add_argument(
+        "--randomize-yaw",
+        type=_non_negative_float,
+        default=0.0,
+        metavar="DEGREES",
+        help=(
+            "On startup and button_x reset, rotate each freejoint object about "
+            "the world Z axis by uniform noise in ±DEGREES (default: 0, off)"
+        ),
     )
     p.add_argument(
         "--enable-collision",
@@ -659,7 +700,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    model, data, mapper, reset_key_id, object_addrs = _setup_model(args)
+    model, data, mapper, reset_key_id, object_addrs, randomizer = _setup_model(args)
     frame_dt = 1.0 / target_fps
     steps_per_frame = max(1, math.ceil(frame_dt / model.opt.timestep))
     loop_dt = steps_per_frame * model.opt.timestep if args.ctrl else frame_dt
@@ -705,6 +746,7 @@ def main() -> None:
                     stop_event,
                     reset_key_id,
                     object_addrs,
+                    randomizer,
                     args.ctrl,
                     args.debug_frames,
                 ),
@@ -737,6 +779,7 @@ def main() -> None:
                 stop_event,
                 reset_key_id,
                 object_addrs,
+                randomizer,
                 args.ctrl,
                 args.debug_frames,
             ),
