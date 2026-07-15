@@ -68,7 +68,7 @@ uv run dora run dataflow-dummy.yaml
 | `position_left` | `float32[8]` | Same layout for the left arm. |
 | `pose_right` | `float32[7]` | VR controller pose `[x, y, z, qw, qx, qy, qz]`. Used only with `--debug-frames`. |
 | `pose_left` | `float32[7]` | Same for the left controller. |
-| `button_x` | `bool[1]` | X button state. Edge-triggered: on press every scene joint on non-arm bodies (freejoint objects plus fixtures like drawers/doors) snaps back to the `--keyframe` pose; the button must be released to re-arm. |
+| `button_x` | `bool[1]` | X button state. Edge-triggered: on press every scene joint on non-arm bodies (freejoint objects plus fixtures like drawers/doors) snaps back to the `--keyframe` pose, then freejoint objects are re-perturbed when `--randomize-pos`/`--randomize-yaw` are set; the button must be released to re-arm. |
 
 ## Outputs
 
@@ -93,6 +93,8 @@ Pass these via the `args:` field in the dataflow YAML, or directly on the comman
 | `--xml PATH` | unset | MJCF scene file to load. Overrides `--scene` when set. |
 | `--scene NAME` | `cell` | Bundled scene to load when `--xml` is not set. Choices: `cell`, `demo`, `pedestal`, `bimanual`. |
 | `--keyframe NAME` | `home` | Keyframe in the MJCF to reset to on startup. |
+| `--randomize-pos METERS` | `0` | On startup and `button_x` reset, offset each freejoint object's keyframe XY position by uniform noise in ±METERS. `0` disables. |
+| `--randomize-yaw DEGREES` | `0` | On startup and `button_x` reset, rotate each freejoint object about the world Z axis by uniform noise in ±DEGREES. `0` disables. |
 | `--enable-collision` | off | Enable contact/collision detection. Disabled by default to avoid unexpected joint-locking during teleoperation. |
 | `--ctrl` | off | Write incoming positions to `data.ctrl` and step the physics (`mj_step`) to simulate actuator control. The default writes directly to `data.qpos` with `mj_forward`. |
 | `--viewer` | off | Open the interactive MuJoCo viewer window. Requires a display. |

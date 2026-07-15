@@ -54,6 +54,8 @@ button_x : bool[1]
     fixtures such as drawers and doors.
     The trigger is edge-detected: the button must be released before the
     next reset can fire.
+    When ``--randomize-pos``/``--randomize-yaw`` are set, freejoint objects
+    are additionally perturbed around the keyframe pose after each reset.
 
 Outputs
 -------
@@ -78,6 +80,14 @@ CLI arguments (set via ``args:`` in the dataflow YAML)
 
 --keyframe NAME  (default: "home")
     Name of the keyframe in the MJCF to reset to on startup.
+
+--randomize-pos METERS  (default: 0, off)
+    On startup and button_x reset, offset each freejoint object's keyframe
+    XY position by uniform noise in ±METERS.
+
+--randomize-yaw DEGREES  (default: 0, off)
+    On startup and button_x reset, rotate each freejoint object about the
+    world Z axis by uniform noise in ±DEGREES.
 
 --enable-collision
     Enable contact/collision detection.  Disabled by default for speed and
