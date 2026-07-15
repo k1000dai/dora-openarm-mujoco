@@ -202,25 +202,34 @@ _JOINT_WIDTHS = {
 }
 
 
-def _find_scene_joint_addrs(model: mujoco.MjModel) -> list[tuple[slice, slice, str]]:
+def _find_scene_joint_addrs(
+    model: mujoco.MjModel,
+) -> list[tuple[slice, slice, str, mujoco.mjtJoint]]:
     """Find joints belonging to non-arm bodies.
 
-    Returns a list of ``(qpos_slice, qvel_slice, name)`` covering freejoint
-    objects and articulated fixtures (drawers, doors, ...).  Bodies whose name
-    starts with ``openarm_`` are skipped so the arms are never teleported.
+    Returns a list of ``(qpos_slice, qvel_slice, name, joint_type)`` covering
+    freejoint objects and articulated fixtures (drawers, doors, ...).  Bodies
+    whose name starts with ``openarm_`` are skipped so the arms are never
+    teleported.
     """
-    addrs: list[tuple[slice, slice, str]] = []
+    addrs: list[tuple[slice, slice, str, mujoco.mjtJoint]] = []
     for jnt_id in range(model.njnt):
         body_id = int(model.jnt_bodyid[jnt_id])
         body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
         if body_name.startswith("openarm_"):
             continue
-        nq, nv = _JOINT_WIDTHS[mujoco.mjtJoint(model.jnt_type[jnt_id])]
+        jnt_type = mujoco.mjtJoint(model.jnt_type[jnt_id])
+        nq, nv = _JOINT_WIDTHS[jnt_type]
         qpos_adr = int(model.jnt_qposadr[jnt_id])
         qvel_adr = int(model.jnt_dofadr[jnt_id])
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jnt_id) or body_name
         addrs.append(
-            (slice(qpos_adr, qpos_adr + nq), slice(qvel_adr, qvel_adr + nv), name)
+            (
+                slice(qpos_adr, qpos_adr + nq),
+                slice(qvel_adr, qvel_adr + nv),
+                name,
+                jnt_type,
+            )
         )
     return addrs
 
@@ -229,12 +238,12 @@ def _reset_scene_objects(
     model: mujoco.MjModel,
     data: mujoco.MjData,
     key_id: int,
-    addrs: list[tuple[slice, slice, str]],
+    addrs: list[tuple[slice, slice, str, mujoco.mjtJoint]],
 ) -> None:
     """Snap each scene joint (arms excluded) back to its keyframe pose."""
     if key_id < 0 or not addrs:
         return
-    for qpos_sl, qvel_sl, _ in addrs:
+    for qpos_sl, qvel_sl, _, _ in addrs:
         data.qpos[qpos_sl] = model.key_qpos[key_id, qpos_sl]
         data.qvel[qvel_sl] = 0.0
     mujoco.mj_forward(model, data)
@@ -357,7 +366,7 @@ def _run_dora(
     data_lock: threading.Lock,
     stop_event: threading.Event,
     reset_key_id: int,
-    object_addrs: list[tuple[slice, slice, str]],
+    object_addrs: list[tuple[slice, slice, str, mujoco.mjtJoint]],
     use_ctrl: bool = False,
     debug_frames: bool = False,
 ) -> None:
@@ -406,7 +415,9 @@ def _run_dora(
                 if pressed and not button_x_prev:
                     with _lock(viewer, data_lock):
                         _reset_scene_objects(model, data, reset_key_id, object_addrs)
-                    names = ", ".join(name for _, _, name in object_addrs) or "(none)"
+                    names = (
+                        ", ".join(name for _, _, name, _ in object_addrs) or "(none)"
+                    )
                     print(f"[reset] button_x pressed → reset objects: {names}")
                 button_x_prev = pressed
 
@@ -465,7 +476,11 @@ def _run_loop(
 def _setup_model(
     args,
 ) -> tuple[
-    mujoco.MjModel, mujoco.MjData, JointResolver, int, list[tuple[slice, slice, str]]
+    mujoco.MjModel,
+    mujoco.MjData,
+    JointResolver,
+    int,
+    list[tuple[slice, slice, str, mujoco.mjtJoint]],
 ]:
     xml_path = args.xml if args.xml is not None else _SCENE_RESOLVERS[args.scene]()
     print(f"[model] Loading scene: {xml_path}")
@@ -501,7 +516,7 @@ def _setup_model(
 
     object_addrs = _find_scene_joint_addrs(model)
     if object_addrs:
-        names = ", ".join(name for _, _, name in object_addrs)
+        names = ", ".join(name for _, _, name, _ in object_addrs)
         print(f"[model] Resettable scene joints: {names}")
     else:
         print("[model] No non-arm scene joints found – button_x reset will be a no-op.")
