@@ -249,6 +249,58 @@ def _reset_scene_objects(
     mujoco.mj_forward(model, data)
 
 
+# ── scene-object randomization ─────────────────────────────────────────────────
+
+
+class SceneRandomizer:
+    """Uniform random XY/yaw perturbation for freejoint scene objects.
+
+    Offsets are centered on the keyframe pose: XY position is shifted by
+    uniform noise in ``±pos_range`` metres and the orientation is rotated
+    about the world Z axis by uniform noise in ``±yaw_range_deg`` degrees.
+    Non-free joints (drawers, doors) and arm bodies are left untouched.
+    """
+
+    def __init__(self, pos_range: float, yaw_range_deg: float):
+        self.pos_range = pos_range
+        self.yaw_range = math.radians(yaw_range_deg)
+        self._rng = np.random.default_rng()
+
+    @property
+    def enabled(self) -> bool:
+        return self.pos_range > 0.0 or self.yaw_range > 0.0
+
+    def apply(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        key_id: int,
+        addrs: list[tuple[slice, slice, str, mujoco.mjtJoint]],
+    ) -> None:
+        """Perturb each freejoint in ``addrs`` around its keyframe pose."""
+        if not self.enabled or key_id < 0:
+            return
+        for qpos_sl, _, name, jnt_type in addrs:
+            if jnt_type != mujoco.mjtJoint.mjJNT_FREE:
+                continue
+            adr = qpos_sl.start
+            dx, dy = self._rng.uniform(-self.pos_range, self.pos_range, size=2)
+            dyaw = self._rng.uniform(-self.yaw_range, self.yaw_range)
+            data.qpos[adr] = model.key_qpos[key_id, adr] + dx
+            data.qpos[adr + 1] = model.key_qpos[key_id, adr + 1] + dy
+            dquat = np.zeros(4)
+            mujoco.mju_axisAngle2Quat(dquat, np.array([0.0, 0.0, 1.0]), dyaw)
+            quat = np.zeros(4)
+            key_quat = model.key_qpos[key_id, adr + 3 : adr + 7]
+            mujoco.mju_mulQuat(quat, dquat, key_quat)
+            data.qpos[adr + 3 : adr + 7] = quat
+            print(
+                f"[randomize] {name}: dx={dx:+.3f} dy={dy:+.3f} "
+                f"dyaw={math.degrees(dyaw):+.0f}°"
+            )
+        mujoco.mj_forward(model, data)
+
+
 # ── offscreen camera rendering ─────────────────────────────────────────────────
 
 
