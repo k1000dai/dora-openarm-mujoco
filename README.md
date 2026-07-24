@@ -66,7 +66,7 @@ uv run dora run dataflow-dummy.yaml
 |----|------|-------------|
 | `position_right` | `float32[8]` | Target joint positions for the right arm: joints 1–7 then the gripper. ~500 Hz. |
 | `position_left` | `float32[8]` | Same layout for the left arm. |
-| `pose_right` | `float32[7]` | VR controller pose `[x, y, z, qw, qx, qy, qz]`. Used only with `--debug-frames`. |
+| `pose_right` | `float32[7]` | VR controller pose `[x, y, z, qw, qx, qy, qz]`, expressed in the `--origin-frame` frame (default: the scene's `arm_origin` site). Used only with `--debug-frames`. |
 | `pose_left` | `float32[7]` | Same for the left controller. |
 | `button_x` | `bool[1]` | X button state. Edge-triggered: on press every scene joint on non-arm bodies (freejoint objects plus fixtures like drawers/doors) snaps back to the `--keyframe` pose; the button must be released to re-arm. |
 
@@ -98,6 +98,8 @@ Pass these via the `args:` field in the dataflow YAML, or directly on the comman
 | `--viewer` | off | Open the interactive MuJoCo viewer window. Requires a display. |
 | `--render` | off | Enable offscreen camera rendering and publish JPEG frames. Leave off if cameras are not needed. |
 | `--debug-frames` | off | Draw VR controller poses as coloured arrows in the viewer. Only visible with `--viewer`. |
+| `--origin-frame NAME` | `arm_origin` | Frame incoming `pose_right`/`pose_left` are relative to; the overlay composes poses with its live world pose and draws the reference axes there. Pass `world` for raw world-frame poses. Missing frame → warning + world fallback. |
+| `--origin-frame-type TYPE` | `site` | MuJoCo object type of `--origin-frame`. Choices: `body`, `site`, `geom`. |
 
 ## License
 

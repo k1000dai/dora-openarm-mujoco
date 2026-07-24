@@ -44,8 +44,9 @@ position_right / position_left : float32[8] or struct{new_position: float32[8], 
     with a ``new_position`` field.
 
 pose_right / pose_left : float32[8]
-    VR controller pose as [x, y, z, qw, qx, qy, qz, gripper].  Only used for the
-    ``--debug-frames`` overlay; ignored otherwise.
+    VR controller pose as [x, y, z, qw, qx, qy, qz, gripper], expressed in the
+    ``--origin-frame`` frame (default: the scene's ``arm_origin`` site).  Only
+    used for the ``--debug-frames`` overlay; ignored otherwise.
 
 button_x : bool[1]
     X button state from the VR controller.  On press every scene joint
@@ -102,6 +103,16 @@ CLI arguments (set via ``args:`` in the dataflow YAML)
 --debug-frames
     Draw the VR controller coordinate frames as coloured arrows in the viewer.
     Only visible when ``--viewer`` is also set.
+
+--origin-frame NAME  (default: "arm_origin")
+    Frame incoming ``pose_right``/``pose_left`` are relative to.  The overlay
+    composes each pose with this frame's live world pose before drawing, and
+    the reference axes are drawn at the frame.  Pass ``world`` for raw
+    world-frame poses.  If the frame is missing from the loaded scene a
+    warning is printed and poses are treated as world-frame.
+
+--origin-frame-type {body,site,geom}  (default: "site")
+    MuJoCo object type of ``--origin-frame``.
 """
 
 import argparse
@@ -122,7 +133,12 @@ import openarm_mujoco.v2 as openarm_mujoco
 import pyarrow as pa
 from openarm_mujoco.v2 import JointResolver
 
-from dora_openarm_mujoco._draw import draw_frame, draw_world_frame
+from dora_openarm_mujoco._draw import (
+    compose_pose,
+    draw_frame,
+    draw_world_frame,
+    origin_world_pose,
+)
 
 _SCENE_RESOLVERS = {
     "cell": openarm_mujoco.openarm_cell_xml,
@@ -131,6 +147,18 @@ _SCENE_RESOLVERS = {
 }
 _DEFAULT_SCENE = "cell"
 _DEFAULT_VIEWER_FPS = 30.0
+
+_DEFAULT_ORIGIN_FRAME = "arm_origin"
+_DEFAULT_ORIGIN_FRAME_TYPE = "site"
+
+# Sentinel --origin-frame value: no origin frame, poses stay world-relative.
+_WORLD_FRAME = "world"
+
+_FRAME_OBJ = {
+    "body": mujoco.mjtObj.mjOBJ_BODY,
+    "site": mujoco.mjtObj.mjOBJ_SITE,
+    "geom": mujoco.mjtObj.mjOBJ_GEOM,
+}
 
 # Arm control rate (matches quittable-tick-leader: 2ms = 500Hz)
 _ARM_HZ = 500
@@ -358,6 +386,8 @@ def _run_dora(
     stop_event: threading.Event,
     reset_key_id: int,
     object_addrs: list[tuple[slice, slice, str]],
+    origin_id: int | None = None,
+    origin_type: str = _DEFAULT_ORIGIN_FRAME_TYPE,
     use_ctrl: bool = False,
     debug_frames: bool = False,
 ) -> None:
@@ -414,9 +444,16 @@ def _run_dora(
                 with viewer.lock():
                     scn = viewer.user_scn
                     scn.ngeom = 0
-                    draw_world_frame(scn)
-                    draw_frame(scn, pose_right)
-                    draw_frame(scn, pose_left)
+                    if origin_id is None:
+                        draw_world_frame(scn)
+                        draw_frame(scn, pose_right)
+                        draw_frame(scn, pose_left)
+                    else:
+                        origin_pose = origin_world_pose(data, origin_id, origin_type)
+                        draw_frame(scn, origin_pose, size=0.3)
+                        for pose in (pose_right, pose_left):
+                            if pose is not None:
+                                draw_frame(scn, compose_pose(origin_pose, pose))
 
     finally:
         print("[dora] Event loop ended – signalling shutdown.")
@@ -462,10 +499,32 @@ def _run_loop(
 # ── model setup ────────────────────────────────────────────────────────────────
 
 
+def _resolve_origin_frame(model: mujoco.MjModel, args) -> int | None:
+    """Resolve --origin-frame to a MuJoCo object ID, or None for world."""
+    if args.origin_frame == _WORLD_FRAME:
+        return None
+    oid = mujoco.mj_name2id(
+        model, _FRAME_OBJ[args.origin_frame_type], args.origin_frame
+    )
+    if oid < 0:
+        print(
+            f"[model] Warning: origin frame '{args.origin_frame}' "
+            f"({args.origin_frame_type}) not found in scene - "
+            "treating poses as world-frame."
+        )
+        return None
+    return oid
+
+
 def _setup_model(
     args,
 ) -> tuple[
-    mujoco.MjModel, mujoco.MjData, JointResolver, int, list[tuple[slice, slice, str]]
+    mujoco.MjModel,
+    mujoco.MjData,
+    JointResolver,
+    int,
+    list[tuple[slice, slice, str]],
+    int | None,
 ]:
     xml_path = args.xml if args.xml is not None else _SCENE_RESOLVERS[args.scene]()
     print(f"[model] Loading scene: {xml_path}")
@@ -506,7 +565,14 @@ def _setup_model(
     else:
         print("[model] No non-arm scene joints found – button_x reset will be a no-op.")
 
-    return model, data, mapper, key_id, object_addrs
+    origin_id = _resolve_origin_frame(model, args)
+    if origin_id is not None:
+        print(
+            f"[model] Pose origin frame: '{args.origin_frame}' "
+            f"({args.origin_frame_type})"
+        )
+
+    return model, data, mapper, key_id, object_addrs, origin_id
 
 
 # ── argument parsing ───────────────────────────────────────────────────────────
@@ -573,6 +639,21 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="Draw VR controller coordinate frames as overlays in the viewer (default: off)",
     )
+    p.add_argument(
+        "--origin-frame",
+        default=_DEFAULT_ORIGIN_FRAME,
+        help=(
+            "Frame incoming pose_right/pose_left are relative to "
+            f"(default: {_DEFAULT_ORIGIN_FRAME}). "
+            f"Pass '{_WORLD_FRAME}' for raw world-frame poses."
+        ),
+    )
+    p.add_argument(
+        "--origin-frame-type",
+        choices=sorted(_FRAME_OBJ),
+        default=_DEFAULT_ORIGIN_FRAME_TYPE,
+        help=f"Origin frame type (default: {_DEFAULT_ORIGIN_FRAME_TYPE})",
+    )
     return p.parse_args()
 
 
@@ -592,7 +673,7 @@ def main() -> None:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    model, data, mapper, reset_key_id, object_addrs = _setup_model(args)
+    model, data, mapper, reset_key_id, object_addrs, origin_id = _setup_model(args)
     frame_dt = 1.0 / target_fps
     steps_per_frame = max(1, math.ceil(frame_dt / model.opt.timestep))
     loop_dt = steps_per_frame * model.opt.timestep if args.ctrl else frame_dt
@@ -638,6 +719,8 @@ def main() -> None:
                     stop_event,
                     reset_key_id,
                     object_addrs,
+                    origin_id,
+                    args.origin_frame_type,
                     args.ctrl,
                     args.debug_frames,
                 ),
@@ -670,6 +753,8 @@ def main() -> None:
                 stop_event,
                 reset_key_id,
                 object_addrs,
+                origin_id,
+                args.origin_frame_type,
                 args.ctrl,
                 args.debug_frames,
             ),
