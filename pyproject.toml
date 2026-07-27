@@ -34,9 +34,6 @@ dependencies = [
     "scipy",
 ]
 
-[tool.uv.sources]
-openarm-mujoco = { git = "https://github.com/enactic/openarm_mujoco.git", rev = "master" }
-
 [project.scripts]
 dora-openarm-mujoco = "dora_openarm_mujoco:cli_main"
 
