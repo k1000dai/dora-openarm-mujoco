@@ -19,10 +19,10 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "dora-openarm-mujoco"
 version = "0.2.0"
-authors = [{name = "Enactic, Inc."}]
+authors = [{ name = "Enactic, Inc." }]
 description = "dora-rs node that simulates OpenArm bimanual robot in MuJoCo"
-license = {text = "Apache-2.0"}
-maintainers = [{name = "Enactic, Inc."}]
+license = { text = "Apache-2.0" }
+maintainers = [{ name = "Enactic, Inc." }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -43,7 +43,7 @@ Issues = "https://github.com/enactic/dora-openarm-mujoco/issues"
 Repository = "https://github.com/enactic/dora-openarm-mujoco"
 
 [tool.setuptools]
-package-dir = {"" = "src"}
+package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

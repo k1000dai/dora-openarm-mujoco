@@ -16,6 +16,41 @@ import mujoco
 import numpy as np
 from scipy.spatial.transform import Rotation
 
+# Pose convention: float32[7] = [px, py, pz, qw, qx, qy, qz]
+
+_ORIGIN_XPOS = {
+    "body": "xpos",
+    "site": "site_xpos",
+    "geom": "geom_xpos",
+}
+_ORIGIN_XMAT = {
+    "body": "xmat",
+    "site": "site_xmat",
+    "geom": "geom_xmat",
+}
+
+
+def origin_world_pose(data: mujoco.MjData, oid: int, otype: str) -> np.ndarray:
+    """Read the live world pose of an origin frame from MjData."""
+    pos = np.asarray(getattr(data, _ORIGIN_XPOS[otype])[oid], dtype=np.float64)
+    mat = np.asarray(getattr(data, _ORIGIN_XMAT[otype])[oid], dtype=np.float64)
+    quat = np.empty(4)
+    mujoco.mju_mat2Quat(quat, mat.reshape(9))
+    return np.concatenate([pos, quat]).astype(np.float32)
+
+
+def compose_pose(origin: np.ndarray, rel: np.ndarray) -> np.ndarray:
+    """Express an origin-relative pose in world coordinates: T_origin * T_rel."""
+    origin = np.asarray(origin, dtype=np.float64)
+    rel = np.asarray(rel, dtype=np.float64)
+    origin_rot = Rotation.from_quat(
+        [origin[4], origin[5], origin[6], origin[3]]
+    )  # xyzw
+    pos = origin[:3] + origin_rot.apply(rel[:3])
+    rot = origin_rot * Rotation.from_quat([rel[4], rel[5], rel[6], rel[3]])
+    qx, qy, qz, qw = rot.as_quat()
+    return np.concatenate([pos, [qw, qx, qy, qz]]).astype(np.float32)
+
 
 def draw_arrow(
     scn, direction: np.ndarray, origin: np.ndarray, color: tuple, size: float
