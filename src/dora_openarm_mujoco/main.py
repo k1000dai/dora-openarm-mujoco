@@ -52,7 +52,8 @@ button_x : bool[1]
     X button state from the VR controller.  On press every scene joint
     (anything other than the arms) is snapped back to the ``--keyframe``
     pose (default: ``home``): freejoint objects as well as articulated
-    fixtures such as drawers and doors.
+    fixtures such as drawers and doors.  With ``--randomize-objects``
+    the freejoint objects land at a randomized pose instead.
     The trigger is edge-detected: the button must be released before the
     next reset can fire.
 
@@ -79,6 +80,13 @@ CLI arguments (set via ``args:`` in the dataflow YAML)
 
 --keyframe NAME  (default: "home")
     Name of the keyframe in the MJCF to reset to on startup.
+
+--randomize-objects [RANGE_M]
+    Randomize freejoint scene objects (e.g. cubes) on startup and on each
+    ``button_x`` reset: uniform xy offset within ±RANGE_M metres of the
+    keyframe pose plus a uniform yaw about the vertical axis.  z and
+    articulated fixtures (drawers, doors) are unchanged.  RANGE_M defaults
+    to 0.05 when the flag is given without a value.
 
 --enable-collision
     Enable contact/collision detection.  Disabled by default for speed and
@@ -230,40 +238,81 @@ _JOINT_WIDTHS = {
 }
 
 
-def _find_scene_joint_addrs(model: mujoco.MjModel) -> list[tuple[slice, slice, str]]:
+def _find_scene_joint_addrs(
+    model: mujoco.MjModel,
+) -> list[tuple[slice, slice, str, mujoco.mjtJoint]]:
     """Find joints belonging to non-arm bodies.
 
-    Returns a list of ``(qpos_slice, qvel_slice, name)`` covering freejoint
-    objects and articulated fixtures (drawers, doors, ...).  Bodies whose name
-    starts with ``openarm_`` are skipped so the arms are never teleported.
+    Returns a list of ``(qpos_slice, qvel_slice, name, joint_type)`` covering
+    freejoint objects and articulated fixtures (drawers, doors, ...).  Bodies
+    whose name starts with ``openarm_`` are skipped so the arms are never
+    teleported.
     """
-    addrs: list[tuple[slice, slice, str]] = []
+    addrs: list[tuple[slice, slice, str, mujoco.mjtJoint]] = []
     for jnt_id in range(model.njnt):
         body_id = int(model.jnt_bodyid[jnt_id])
         body_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body_id) or ""
         if body_name.startswith("openarm_"):
             continue
-        nq, nv = _JOINT_WIDTHS[mujoco.mjtJoint(model.jnt_type[jnt_id])]
+        jnt_type = mujoco.mjtJoint(model.jnt_type[jnt_id])
+        nq, nv = _JOINT_WIDTHS[jnt_type]
         qpos_adr = int(model.jnt_qposadr[jnt_id])
         qvel_adr = int(model.jnt_dofadr[jnt_id])
         name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, jnt_id) or body_name
         addrs.append(
-            (slice(qpos_adr, qpos_adr + nq), slice(qvel_adr, qvel_adr + nv), name)
+            (
+                slice(qpos_adr, qpos_adr + nq),
+                slice(qvel_adr, qvel_adr + nv),
+                name,
+                jnt_type,
+            )
         )
     return addrs
+
+
+def _randomize_free_qpos(
+    center: np.ndarray, range_m: float, rng: np.random.Generator
+) -> np.ndarray:
+    """Perturb a freejoint qpos ``[x, y, z, qw, qx, qy, qz]`` around ``center``.
+
+    x/y get a uniform offset within ±range_m, z is kept, and the orientation
+    is composed with a uniform yaw about the world vertical axis.
+    """
+    out = np.array(center, dtype=np.float64)
+    out[:2] += rng.uniform(-range_m, range_m, size=2)
+    yaw = rng.uniform(-np.pi, np.pi)
+    q_yaw = np.array([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)])
+    q_new = np.empty(4)
+    mujoco.mju_mulQuat(q_new, q_yaw, out[3:7])
+    out[3:7] = q_new
+    return out
 
 
 def _reset_scene_objects(
     model: mujoco.MjModel,
     data: mujoco.MjData,
     key_id: int,
-    addrs: list[tuple[slice, slice, str]],
+    addrs: list[tuple[slice, slice, str, mujoco.mjtJoint]],
+    randomize_range: float | None = None,
+    rng: np.random.Generator | None = None,
 ) -> None:
-    """Snap each scene joint (arms excluded) back to its keyframe pose."""
-    if key_id < 0 or not addrs:
+    """Snap each scene joint (arms excluded) back to its keyframe pose.
+
+    When ``randomize_range`` is set, freejoint objects additionally get a
+    uniform xy offset within ±randomize_range metres and a uniform yaw; z and
+    articulated fixtures stay at the keyframe pose.  Scenes without the
+    keyframe fall back to the model default pose (``qpos0``) as the center.
+    """
+    if not addrs or (key_id < 0 and randomize_range is None):
         return
-    for qpos_sl, qvel_sl, _ in addrs:
-        data.qpos[qpos_sl] = model.key_qpos[key_id, qpos_sl]
+    for qpos_sl, qvel_sl, _, jnt_type in addrs:
+        center = (
+            model.key_qpos[key_id, qpos_sl] if key_id >= 0 else model.qpos0[qpos_sl]
+        )
+        if randomize_range is not None and jnt_type == mujoco.mjtJoint.mjJNT_FREE:
+            data.qpos[qpos_sl] = _randomize_free_qpos(center, randomize_range, rng)
+        else:
+            data.qpos[qpos_sl] = center
         data.qvel[qvel_sl] = 0.0
     mujoco.mj_forward(model, data)
 
@@ -385,7 +434,9 @@ def _run_dora(
     data_lock: threading.Lock,
     stop_event: threading.Event,
     reset_key_id: int,
-    object_addrs: list[tuple[slice, slice, str]],
+    object_addrs: list[tuple[slice, slice, str, mujoco.mjtJoint]],
+    randomize_range: float | None = None,
+    rng: np.random.Generator | None = None,
     origin_id: int | None = None,
     origin_type: str = _DEFAULT_ORIGIN_FRAME_TYPE,
     use_ctrl: bool = False,
@@ -435,9 +486,19 @@ def _run_dora(
                 pressed = bool(np.asarray(event["value"]).reshape(-1)[0])
                 if pressed and not button_x_prev:
                     with _lock(viewer, data_lock):
-                        _reset_scene_objects(model, data, reset_key_id, object_addrs)
-                    names = ", ".join(name for _, _, name in object_addrs) or "(none)"
-                    print(f"[reset] button_x pressed → reset objects: {names}")
+                        _reset_scene_objects(
+                            model,
+                            data,
+                            reset_key_id,
+                            object_addrs,
+                            randomize_range,
+                            rng,
+                        )
+                    names = (
+                        ", ".join(name for _, _, name, _ in object_addrs) or "(none)"
+                    )
+                    mode = "randomized" if randomize_range is not None else "reset"
+                    print(f"[reset] button_x pressed → {mode} objects: {names}")
                 button_x_prev = pressed
 
             if viewer is not None and debug_frames:
@@ -518,12 +579,13 @@ def _resolve_origin_frame(model: mujoco.MjModel, args) -> int | None:
 
 def _setup_model(
     args,
+    rng: np.random.Generator,
 ) -> tuple[
     mujoco.MjModel,
     mujoco.MjData,
     JointResolver,
     int,
-    list[tuple[slice, slice, str]],
+    list[tuple[slice, slice, str, mujoco.mjtJoint]],
     int | None,
 ]:
     xml_path = args.xml if args.xml is not None else _SCENE_RESOLVERS[args.scene]()
@@ -560,10 +622,19 @@ def _setup_model(
 
     object_addrs = _find_scene_joint_addrs(model)
     if object_addrs:
-        names = ", ".join(name for _, _, name in object_addrs)
+        names = ", ".join(name for _, _, name, _ in object_addrs)
         print(f"[model] Resettable scene joints: {names}")
     else:
         print("[model] No non-arm scene joints found – button_x reset will be a no-op.")
+
+    if args.randomize_objects is not None:
+        print(
+            f"[model] Object randomization enabled: "
+            f"xy ±{args.randomize_objects:g} m, yaw ±180°."
+        )
+        _reset_scene_objects(
+            model, data, key_id, object_addrs, args.randomize_objects, rng
+        )
 
     origin_id = _resolve_origin_frame(model, args)
     if origin_id is not None:
@@ -603,6 +674,20 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--keyframe", "-k", default="home", help="Initial keyframe name (default: home)"
+    )
+    p.add_argument(
+        "--randomize-objects",
+        nargs="?",
+        const=0.05,
+        default=None,
+        type=_positive_float,
+        metavar="RANGE_M",
+        help=(
+            "Randomize freejoint scene objects on startup and button_x reset: "
+            "uniform xy offset within ±RANGE_M metres of the keyframe pose plus "
+            "a uniform yaw; z and articulated fixtures are unchanged "
+            "(default range when the value is omitted: 0.05)"
+        ),
     )
     p.add_argument(
         "--enable-collision",
@@ -673,7 +758,8 @@ def main() -> None:
     signal.signal(signal.SIGINT, _on_signal)
     signal.signal(signal.SIGTERM, _on_signal)
 
-    model, data, mapper, reset_key_id, object_addrs, origin_id = _setup_model(args)
+    rng = np.random.default_rng()
+    model, data, mapper, reset_key_id, object_addrs, origin_id = _setup_model(args, rng)
     frame_dt = 1.0 / target_fps
     steps_per_frame = max(1, math.ceil(frame_dt / model.opt.timestep))
     loop_dt = steps_per_frame * model.opt.timestep if args.ctrl else frame_dt
@@ -719,6 +805,8 @@ def main() -> None:
                     stop_event,
                     reset_key_id,
                     object_addrs,
+                    args.randomize_objects,
+                    rng,
                     origin_id,
                     args.origin_frame_type,
                     args.ctrl,
@@ -753,6 +841,8 @@ def main() -> None:
                 stop_event,
                 reset_key_id,
                 object_addrs,
+                args.randomize_objects,
+                rng,
                 origin_id,
                 args.origin_frame_type,
                 args.ctrl,
