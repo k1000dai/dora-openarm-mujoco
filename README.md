@@ -102,6 +102,41 @@ Pass these via the `args:` field in the dataflow YAML, or directly on the comman
 | `--origin-frame NAME` | `arm_origin` | Frame incoming `pose_right`/`pose_left` are relative to; the overlay composes poses with its live world pose and draws the reference axes there. Pass `world` for raw world-frame poses. Missing frame → warning + world fallback. |
 | `--origin-frame-type TYPE` | `site` | MuJoCo object type of `--origin-frame`. Choices: `body`, `site`, `geom`. |
 
+### Environment variables
+
+Every argument's default can also be set via an environment variable named
+`DORA_OPENARM_MUJOCO_` + the upper-cased argument name:
+
+| Environment variable | Argument |
+|----------------------|----------|
+| `DORA_OPENARM_MUJOCO_XML` | `--xml` |
+| `DORA_OPENARM_MUJOCO_SCENE` | `--scene` |
+| `DORA_OPENARM_MUJOCO_KEYFRAME` | `--keyframe` |
+| `DORA_OPENARM_MUJOCO_ENABLE_COLLISION` | `--enable-collision` |
+| `DORA_OPENARM_MUJOCO_CTRL` | `--ctrl` |
+| `DORA_OPENARM_MUJOCO_VIEWER` | `--viewer` |
+| `DORA_OPENARM_MUJOCO_RENDER` | `--render` |
+| `DORA_OPENARM_MUJOCO_DEBUG_FRAMES` | `--debug-frames` |
+| `DORA_OPENARM_MUJOCO_ORIGIN_FRAME` | `--origin-frame` |
+| `DORA_OPENARM_MUJOCO_ORIGIN_FRAME_TYPE` | `--origin-frame-type` |
+
+Boolean flags accept `1`/`0`, `true`/`false`, `yes`/`no` and `on`/`off`.
+`DORA_OPENARM_MUJOCO_VIEWER` additionally accepts an FPS number
+(e.g. `60`); `true` enables the viewer at the default 30 Hz.
+
+Explicit CLI arguments override the environment. Boolean flags also gain a
+`--no-*` form (e.g. `--no-render`, `--no-viewer`) to turn an
+environment-enabled option back off. Set the variables via the `env:` field
+of the node in the dataflow YAML:
+
+```yaml
+- id: openarm-mujoco
+  path: dora-openarm-mujoco
+  env:
+    DORA_OPENARM_MUJOCO_VIEWER: "60"
+    DORA_OPENARM_MUJOCO_RENDER: "true"
+```
+
 ## License
 
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.

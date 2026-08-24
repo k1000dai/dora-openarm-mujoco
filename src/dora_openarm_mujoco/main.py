@@ -72,6 +72,14 @@ camera_wrist_right / camera_wrist_left / camera_head_left / camera_head_right / 
 
 CLI arguments (set via ``args:`` in the dataflow YAML)
 --------------------------------------------------------
+Every argument's default can also be set via an environment variable named
+``DORA_OPENARM_MUJOCO_`` + the upper-cased argument name (e.g. ``--keyframe``
+→ ``DORA_OPENARM_MUJOCO_KEYFRAME``).  Boolean flags accept ``1/0``,
+``true/false``, ``yes/no`` and ``on/off``; ``DORA_OPENARM_MUJOCO_VIEWER``
+additionally accepts an FPS number.  Explicit CLI arguments override the
+environment; boolean flags gain a ``--no-*`` form (e.g. ``--no-render``,
+``--no-viewer``) to turn an environment-enabled option back off.
+
 --xml PATH
     MJCF scene file.  Defaults to the bundled openarm_cell scene.
 
@@ -648,6 +656,14 @@ def _setup_model(
 
 # ── argument parsing ───────────────────────────────────────────────────────────
 
+# Every CLI argument's default can be set via an environment variable named
+# _ENV_PREFIX + the upper-cased argument name (e.g. --origin-frame →
+# DORA_OPENARM_MUJOCO_ORIGIN_FRAME).  Explicit CLI arguments always win.
+_ENV_PREFIX = "DORA_OPENARM_MUJOCO_"
+
+_TRUE_WORDS = ("1", "true", "yes", "on")
+_FALSE_WORDS = ("", "0", "false", "no", "off")
+
 
 def _positive_float(value: str) -> float:
     try:
@@ -659,21 +675,80 @@ def _positive_float(value: str) -> float:
     return parsed
 
 
+def _env(name: str) -> str | None:
+    return os.environ.get(_ENV_PREFIX + name)
+
+
+def _env_error(name: str, message: str) -> SystemExit:
+    return SystemExit(f"error: environment variable {_ENV_PREFIX}{name}: {message}")
+
+
+def _env_str(name: str, fallback: str | None) -> str | None:
+    value = _env(name)
+    return fallback if value is None else value
+
+
+def _env_choice(name: str, fallback: str, choices) -> str:
+    value = _env(name)
+    if value is None:
+        return fallback
+    if value not in choices:
+        raise _env_error(name, f"must be one of {sorted(choices)}, got {value!r}")
+    return value
+
+
+def _env_bool(name: str) -> bool:
+    value = _env(name)
+    if value is None:
+        return False
+    lowered = value.strip().lower()
+    if lowered in _TRUE_WORDS:
+        return True
+    if lowered in _FALSE_WORDS:
+        return False
+    raise _env_error(
+        name, f"must be a boolean (1/0, true/false, yes/no, on/off), got {value!r}"
+    )
+
+
+def _env_viewer_fps(name: str) -> float | None:
+    value = _env(name)
+    if value is None:
+        return None
+    lowered = value.strip().lower()
+    if lowered in ("", "0", "false", "no", "off"):
+        return None
+    if lowered in ("true", "yes", "on"):
+        return _DEFAULT_VIEWER_FPS
+    try:
+        return _positive_float(value)
+    except argparse.ArgumentTypeError as exc:
+        raise _env_error(name, str(exc)) from exc
+
+
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="Viewer dora node – MuJoCo renderer with camera output for OpenArm"
     )
     p.add_argument(
-        "--xml", default=None, help="MJCF scene file. Overrides --scene when set."
+        "--xml",
+        default=_env_str("XML", None),
+        help=(f"MJCF scene file. Overrides --scene when set. (env: {_ENV_PREFIX}XML)"),
     )
     p.add_argument(
         "--scene",
         choices=sorted(_SCENE_RESOLVERS),
-        default=_DEFAULT_SCENE,
-        help=f"Bundled scene to load when --xml is not set (default: {_DEFAULT_SCENE})",
+        default=_env_choice("SCENE", _DEFAULT_SCENE, _SCENE_RESOLVERS),
+        help=(
+            "Bundled scene to load when --xml is not set "
+            f"(default: {_DEFAULT_SCENE}; env: {_ENV_PREFIX}SCENE)"
+        ),
     )
     p.add_argument(
-        "--keyframe", "-k", default="home", help="Initial keyframe name (default: home)"
+        "--keyframe",
+        "-k",
+        default=_env_str("KEYFRAME", "home"),
+        help=f"Initial keyframe name (default: home; env: {_ENV_PREFIX}KEYFRAME)",
     )
     p.add_argument(
         "--randomize-objects",
@@ -691,19 +766,27 @@ def _parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--enable-collision",
-        action="store_true",
-        help="Enable collision detection (default: disabled)",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("ENABLE_COLLISION"),
+        help=(
+            "Enable collision detection "
+            f"(default: disabled; env: {_ENV_PREFIX}ENABLE_COLLISION)"
+        ),
     )
     p.add_argument(
         "--ctrl",
-        action="store_true",
-        help="Write data.ctrl targets and step physics instead of writing data.qpos directly",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("CTRL"),
+        help=(
+            "Write data.ctrl targets and step physics instead of writing "
+            f"data.qpos directly (env: {_ENV_PREFIX}CTRL)"
+        ),
     )
     p.add_argument(
         "--viewer",
         nargs="?",
         const=_DEFAULT_VIEWER_FPS,
-        default=None,
+        default=_env_viewer_fps("VIEWER"),
         type=_positive_float,
         metavar="FPS",
         help=(
@@ -711,33 +794,55 @@ def _parse_args() -> argparse.Namespace:
             "Optionally set the target loop frame rate in Hz, which controls "
             "viewer sync, camera publish checks, and control stepping cadence; "
             "--ctrl mode snaps the effective cadence to the MuJoCo timestep "
-            f"(default when omitted: {_DEFAULT_VIEWER_FPS:g})"
+            f"(default when omitted: {_DEFAULT_VIEWER_FPS:g}). "
+            f"(env: {_ENV_PREFIX}VIEWER — true/false or an FPS number)"
         ),
     )
     p.add_argument(
+        "--no-viewer",
+        dest="viewer",
+        action="store_const",
+        const=None,
+        help=f"Disable the viewer (overrides {_ENV_PREFIX}VIEWER)",
+    )
+    p.add_argument(
         "--render",
-        action="store_true",
-        help="Enable offscreen camera rendering and publish images (default: off)",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("RENDER"),
+        help=(
+            "Enable offscreen camera rendering and publish images "
+            f"(default: off; env: {_ENV_PREFIX}RENDER)"
+        ),
     )
     p.add_argument(
         "--debug-frames",
-        action="store_true",
-        help="Draw VR controller coordinate frames as overlays in the viewer (default: off)",
+        action=argparse.BooleanOptionalAction,
+        default=_env_bool("DEBUG_FRAMES"),
+        help=(
+            "Draw VR controller coordinate frames as overlays in the viewer "
+            f"(default: off; env: {_ENV_PREFIX}DEBUG_FRAMES)"
+        ),
     )
     p.add_argument(
         "--origin-frame",
-        default=_DEFAULT_ORIGIN_FRAME,
+        default=_env_str("ORIGIN_FRAME", _DEFAULT_ORIGIN_FRAME),
         help=(
             "Frame incoming pose_right/pose_left are relative to "
-            f"(default: {_DEFAULT_ORIGIN_FRAME}). "
+            f"(default: {_DEFAULT_ORIGIN_FRAME}; env: {_ENV_PREFIX}ORIGIN_FRAME). "
             f"Pass '{_WORLD_FRAME}' for raw world-frame poses."
         ),
     )
     p.add_argument(
         "--origin-frame-type",
         choices=sorted(_FRAME_OBJ),
-        default=_DEFAULT_ORIGIN_FRAME_TYPE,
-        help=f"Origin frame type (default: {_DEFAULT_ORIGIN_FRAME_TYPE})",
+        default=_env_choice(
+            "ORIGIN_FRAME_TYPE", _DEFAULT_ORIGIN_FRAME_TYPE, _FRAME_OBJ
+        ),
+        help=(
+            "Origin frame type "
+            f"(default: {_DEFAULT_ORIGIN_FRAME_TYPE}; "
+            f"env: {_ENV_PREFIX}ORIGIN_FRAME_TYPE)"
+        ),
     )
     return p.parse_args()
 
