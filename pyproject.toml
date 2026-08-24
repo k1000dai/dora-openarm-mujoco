@@ -18,7 +18,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dora-openarm-mujoco"
-version = "0.3.0"
+version = "0.4.0"
 authors = [{ name = "Enactic, Inc." }]
 description = "dora-rs node that simulates OpenArm bimanual robot in MuJoCo"
 license = { text = "Apache-2.0" }
