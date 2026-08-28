@@ -12,8 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-dora-openarm-mujoco — MuJoCo simulation node for OpenArm bimanual
+"""dora-openarm-mujoco — MuJoCo simulation node for OpenArm bimanual
 ========================================================================
 
 This dora node simulates the OpenArm bimanual in MuJoCo.  It replaces
@@ -70,6 +69,13 @@ camera_wrist_right / camera_wrist_left / camera_head_left / camera_head_right / 
     JPEG-encoded frames at ~30 Hz.  Only published when ``--render`` is set.
     Each output carries ``metadata={"encoding": "jpeg"}``.
 
+<depth-camera>_depth : uint8[N]
+    Ground-truth depth of the camera named by ``--depth-camera``, rendered
+    alongside its RGB frame and published as a 16-bit single-channel PNG in
+    millimeters (values beyond 65.535 m saturate).  Only published when both
+    ``--render`` and ``--depth-camera`` are set.  Carries
+    ``metadata={"encoding": "png", "unit": "millimeter"}``.
+
 CLI arguments (set via ``args:`` in the dataflow YAML)
 --------------------------------------------------------
 Every argument's default can also be set via an environment variable named
@@ -115,6 +121,11 @@ environment; boolean flags gain a ``--no-*`` form (e.g. ``--no-render``,
 --render
     Enable offscreen camera rendering and publish JPEG frames.  Adds latency;
     leave off if cameras are not needed.
+
+--depth-camera NAME
+    Also render NAME's ground-truth depth each camera frame and publish it
+    as ``<NAME>_depth`` (16-bit PNG, millimeters).  Useful for a browser
+    point-cloud view fed by e.g. ``camera_head_left``.  Requires --render.
 
 --debug-frames
     Draw the VR controller coordinate frames as coloured arrows in the viewer.
@@ -331,10 +342,16 @@ def _reset_scene_objects(
 class CameraRenderer:
     """Offscreen renderer for MuJoCo cameras. Renders to JPEG bytes."""
 
-    def __init__(self, model: mujoco.MjModel, jpeg_quality: int = 90):
+    def __init__(
+        self,
+        model: mujoco.MjModel,
+        jpeg_quality: int = 90,
+        depth_camera: str | None = None,
+    ):
         self.jpeg_quality = jpeg_quality
         self.cam_ids: dict[str, int] = {}
         self.renderers: dict[str, mujoco.Renderer] = {}
+        self.depth_camera = depth_camera
 
         cam_resolutions: dict[str, tuple[int, int]] = {}
         for cam_name in _CAMERAS:
@@ -361,7 +378,14 @@ class CameraRenderer:
                     f"[camera] ERROR: could not initialize renderer for '{cam_name}': {e}"
                 )
 
-    def render_all(self, data: mujoco.MjData) -> dict[str, bytes]:
+        if self.depth_camera is not None and self.depth_camera not in self.renderers:
+            print(
+                f"[camera] Warning: depth camera '{self.depth_camera}' not "
+                "available; no depth will be published"
+            )
+            self.depth_camera = None
+
+    def render_all(self, data: mujoco.MjData) -> dict[str, tuple[bytes, dict]]:
         images = {}
         for cam_name, renderer in self.renderers.items():
             renderer.update_scene(data, camera=self.cam_ids[cam_name])
@@ -371,7 +395,19 @@ class CameraRenderer:
                 ".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
             )
             if ok:
-                images[cam_name] = buf.tobytes()
+                images[cam_name] = (buf.tobytes(), {"encoding": "jpeg"})
+            if cam_name == self.depth_camera:
+                # Same scene update as the RGB frame, so the pair is aligned.
+                renderer.enable_depth_rendering()
+                depth_m = renderer.render()
+                renderer.disable_depth_rendering()
+                depth_mm = np.clip(depth_m * 1000.0, 0, 65535).astype(np.uint16)
+                ok, buf = cv2.imencode(".png", depth_mm)
+                if ok:
+                    images[f"{cam_name}_depth"] = (
+                        buf.tobytes(),
+                        {"encoding": "png", "unit": "millimeter"},
+                    )
         return images
 
     def close(self) -> None:
@@ -394,11 +430,11 @@ class CameraScheduler:
             return
         with lock_fn():
             images = self._renderer.render_all(self._data)
-        for cam_name, jpeg_bytes in images.items():
+        for cam_name, (payload, metadata) in images.items():
             self._node.send_output(
                 cam_name,
-                pa.array(np.frombuffer(jpeg_bytes, dtype=np.uint8), type=pa.uint8()),
-                metadata={"encoding": "jpeg"},
+                pa.array(np.frombuffer(payload, dtype=np.uint8), type=pa.uint8()),
+                metadata=metadata,
             )
         self._next += _CAM_DT
 
@@ -815,6 +851,15 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--depth-camera",
+        default=_env_str("DEPTH_CAMERA", None),
+        help=(
+            "Also render this camera's ground-truth depth each frame and "
+            "publish it as <NAME>_depth (16-bit PNG, millimeters); requires "
+            f"--render (default: off; env: {_ENV_PREFIX}DEPTH_CAMERA)"
+        ),
+    )
+    p.add_argument(
         "--debug-frames",
         action=argparse.BooleanOptionalAction,
         default=_env_bool("DEBUG_FRAMES"),
@@ -885,7 +930,7 @@ def main() -> None:
 
     cam_scheduler: CameraScheduler | None = None
     if args.render:
-        renderer = CameraRenderer(model, _JPEG_QUALITY)
+        renderer = CameraRenderer(model, _JPEG_QUALITY, depth_camera=args.depth_camera)
         print(f"[camera] Available cameras: {list(renderer.cam_ids.keys())}")
         cam_scheduler = CameraScheduler(renderer, node, data)
 
